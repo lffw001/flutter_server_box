@@ -1,184 +1,304 @@
-import 'package:fl_lib/fl_lib.dart';
+import 'dart:convert';
 
-import '../../../data/res/misc.dart';
+import 'package:server_box/data/model/server/system.dart';
+import 'package:server_box/src/rust/api/proc.dart' as ffi;
 
-class _ProcValIdxMap {
-  final int pid;
-  final int? user;
-  final int? cpu;
-  final int? mem;
-  final int? vsz;
-  final int? rss;
-  final int? tty;
-  final int? stat;
-  final int? start;
-  final int? time;
-  final int command;
-
-  const _ProcValIdxMap({
-    required this.pid,
-    this.user,
-    this.cpu,
-    this.mem,
-    this.vsz,
-    this.rss,
-    this.tty,
-    this.stat,
-    this.start,
-    this.time,
-    required this.command,
-  });
-}
-
-/// Some field can be null due to incompatible format on `BSD` and `Alpine`
+/// One row of a process table, as `sbm_parser::proc::ProcRow` sends it: the
+/// process, and what is derived from it there (its [name], [rssKb], whether
+/// it is a kernel thread, whether it may be signalled). The table is read on
+/// the Rust side — the rules the monitor agent's panel reads it by too; this
+/// only carries the row.
+///
+/// Any field can be null: the columns differ per platform and per `ps`, and
+/// null means the platform did not say, which is not the same as zero.
 class Proc {
   final String? user;
   final int pid;
+  final int? ppid;
   final double? cpu;
   final double? mem;
   final String? vsz;
   final String? rss;
   final String? tty;
   final String? stat;
+  final int? nice;
+  final int? threads;
   final String? start;
+
+  /// What a stop checks the PID against: the process's start identity.
+  final String? startId;
   final String? time;
+  final int? elapsedSeconds;
+  final int? readBytes;
+  final int? writeBytes;
+
+  /// Bytes per second since the previous reading; null on the first one.
+  final double? readSpeed;
+  final double? writeSpeed;
   final String command;
 
+  /// What to call the process where its whole command line does not fit.
+  final String name;
+
+  /// `RSS` in KiB as a number; null where `ps` printed none.
+  final int? rssKb;
+
+  /// `kthreadd` or one of its children.
+  final bool isKernelThread;
+
+  /// Whether this row may be signalled at all.
+  final bool killable;
+
   const Proc({
-    this.user,
     required this.pid,
+    required this.command,
+    this.user,
+    this.ppid,
     this.cpu,
     this.mem,
     this.vsz,
     this.rss,
     this.tty,
     this.stat,
+    this.nice,
+    this.threads,
     this.start,
+    this.startId,
     this.time,
-    required this.command,
-  });
+    this.elapsedSeconds,
+    this.readBytes,
+    this.writeBytes,
+    this.readSpeed,
+    this.writeSpeed,
+    String? name,
+    this.rssKb,
+    this.isKernelThread = false,
+    this.killable = false,
+  }) : name = name ?? command;
 
-  factory Proc.parse(String raw, _ProcValIdxMap map) {
-    final parts = raw.split(RegExp(r'\s+'));
-    return Proc(
-      user: map.user == null ? null : parts[map.user!],
-      pid: int.parse(parts[map.pid]),
-      cpu: map.cpu == null ? null : double.parse(parts[map.cpu!]),
-      mem: map.mem == null ? null : double.parse(parts[map.mem!]),
-      vsz: map.vsz == null ? null : parts[map.vsz!],
-      rss: map.rss == null ? null : parts[map.rss!],
-      tty: map.tty == null ? null : parts[map.tty!],
-      stat: map.stat == null ? null : parts[map.stat!],
-      start: map.start == null ? null : parts[map.start!],
-      time: map.time == null ? null : parts[map.time!],
-      command: parts.sublist(map.command).join(' '),
-    );
-  }
-
-  Map toJson() {
-    return {
-      'user': user,
-      'pid': pid,
-      'cpu': cpu,
-      'mem': mem,
-      'vsz': vsz,
-      'rss': rss,
-      'tty': tty,
-      'stat': stat,
-      'start': start,
-      'time': time,
-      'command': command,
-    };
-  }
-
-  @override
-  String toString() {
-    return Miscs.jsonEncoder.convert(toJson());
-  }
-
-  String get binary {
-    final parts = command.split(' ');
-    return parts[0];
-  }
+  factory Proc.fromJson(Map<String, Object?> j) => Proc(
+    pid: (j['pid'] as num).toInt(),
+    command: j['command'] as String,
+    user: j['user'] as String?,
+    ppid: (j['ppid'] as num?)?.toInt(),
+    cpu: (j['cpu'] as num?)?.toDouble(),
+    mem: (j['mem'] as num?)?.toDouble(),
+    vsz: j['vsz'] as String?,
+    rss: j['rss'] as String?,
+    tty: j['tty'] as String?,
+    stat: j['stat'] as String?,
+    nice: (j['nice'] as num?)?.toInt(),
+    threads: (j['threads'] as num?)?.toInt(),
+    start: j['start'] as String?,
+    startId: j['start_id'] as String?,
+    time: j['time'] as String?,
+    elapsedSeconds: (j['elapsed_seconds'] as num?)?.toInt(),
+    readBytes: (j['read_bytes'] as num?)?.toInt(),
+    writeBytes: (j['write_bytes'] as num?)?.toInt(),
+    readSpeed: (j['read_speed'] as num?)?.toDouble(),
+    writeSpeed: (j['write_speed'] as num?)?.toDouble(),
+    name: j['name'] as String,
+    rssKb: (j['rss_kb'] as num?)?.toInt(),
+    isKernelThread: j['is_kernel_thread'] as bool? ?? false,
+    killable: j['killable'] as bool? ?? false,
+  );
 }
 
-// `ps -aux` result
-class PsResult {
-  final List<Proc> procs;
-  final String? error;
+enum PsParseFailure {
+  unsupportedOutput,
+  invalidRows,
+  invalidWindowsJson,
+  invalidWindowsRows;
 
-  const PsResult({
-    required this.procs,
-    this.error,
-  });
-
-  factory PsResult.parse(String raw, {ProcSortMode sort = ProcSortMode.cpu}) {
-    final lines = raw.split('\n').map((e) => e.trim()).toList();
-    if (lines.isEmpty) return const PsResult(procs: [], error: null);
-
-    final header = lines[0];
-    final parts = header.split(RegExp(r'\s+'));
-    parts.removeWhere((element) => element.isEmpty);
-    final map = _ProcValIdxMap(
-      pid: parts.indexOfOrNull('PID')!,
-      user: parts.indexOfOrNull('USER'),
-      cpu: parts.indexOfOrNull('%CPU'),
-      mem: parts.indexOfOrNull('%MEM'),
-      vsz: parts.indexOfOrNull('VSZ'),
-      rss: parts.indexOfOrNull('RSS'),
-      tty: parts.indexOfOrNull('TTY'),
-      stat: parts.indexOfOrNull('STAT'),
-      start: parts.indexOfOrNull('START'),
-      time: parts.indexOfOrNull('TIME'),
-      command: parts.indexOfOrNull('COMMAND') ?? parts.indexOfOrNull('CMD')!,
-    );
-
-    final procs = <Proc>[];
-    final errs = <String>[];
-    for (var i = 1; i < lines.length; i++) {
-      final line = lines[i];
-      if (line.isEmpty) continue;
-      try {
-        procs.add(Proc.parse(line, map));
-      } catch (e, trace) {
-        errs.add('$line: $e');
-        Loggers.app.warning('Process failed', e, trace);
-      }
-    }
-
-    switch (sort) {
-      case ProcSortMode.cpu:
-        procs.sort((a, b) => b.cpu?.compareTo(a.cpu ?? 0) ?? 0);
-        break;
-      case ProcSortMode.mem:
-        procs.sort((a, b) => b.mem?.compareTo(a.mem ?? 0) ?? 0);
-        break;
-      case ProcSortMode.pid:
-        procs.sort((a, b) => a.pid.compareTo(b.pid));
-        break;
-      case ProcSortMode.user:
-        procs.sort((a, b) => a.user?.compareTo(b.user ?? '') ?? 0);
-        break;
-      case ProcSortMode.name:
-        procs.sort((a, b) => a.binary.compareTo(b.binary));
-        break;
-    }
-    return PsResult(procs: procs, error: errs.isEmpty ? null : errs.join('\n'));
-  }
+  static PsParseFailure? fromWire(String? name) => switch (name) {
+    'unsupported_output' => unsupportedOutput,
+    'invalid_rows' => invalidRows,
+    'invalid_windows_json' => invalidWindowsJson,
+    'invalid_windows_rows' => invalidWindowsRows,
+    _ => null,
+  };
 }
 
+class PsParseIssue {
+  final PsParseFailure failure;
+  final String diagnostics;
+
+  const PsParseIssue({required this.failure, required this.diagnostics});
+}
+
+/// The 1, 5 and 15 minute load averages.
+typedef ProcLoad = ({double one, double five, double fifteen});
+
+/// The orders a table can be read in. Which of them one table can answer is
+/// [PsResult.sorts].
 enum ProcSortMode {
   cpu,
   mem,
+  rss,
+  read,
+  write,
   pid,
   user,
-  name,
-  ;
+  name;
+
+  static ProcSortMode? fromWire(String? name) =>
+      values.where((m) => m.name == name).firstOrNull;
 }
 
-extension _StrIndex on List<String> {
-  int? indexOfOrNull(String val) {
-    final idx = indexOf(val);
-    return idx == -1 ? null : idx;
+enum ProcSignal {
+  /// Asks the process to end.
+  term,
+
+  /// Ends it.
+  kill;
+
+  static ProcSignal? fromWire(String? name) =>
+      values.where((s) => s.name == name).firstOrNull;
+}
+
+/// Which of the machine's columns carried a value in any row.
+class ProcColumns {
+  final bool user;
+  final bool cpu;
+  final bool mem;
+  final bool rss;
+  final bool read;
+  final bool write;
+  final bool readSpeed;
+  final bool writeSpeed;
+
+  const ProcColumns({
+    this.user = false,
+    this.cpu = false,
+    this.mem = false,
+    this.rss = false,
+    this.read = false,
+    this.write = false,
+    this.readSpeed = false,
+    this.writeSpeed = false,
+  });
+
+  factory ProcColumns.fromJson(Map<String, Object?> j) => ProcColumns(
+    user: j['user'] == true,
+    cpu: j['cpu'] == true,
+    mem: j['mem'] == true,
+    rss: j['rss'] == true,
+    read: j['read'] == true,
+    write: j['write'] == true,
+    readSpeed: j['read_speed'] == true,
+    writeSpeed: j['write_speed'] == true,
+  );
+}
+
+/// One reading of the process table as `sbm_parser::proc::PsView` gives it:
+/// its rows in [sort] order, the columns it has, the orders it can answer
+/// and the signals the platform offers.
+class PsResult {
+  final List<Proc> procs;
+  final PsParseIssue? issue;
+  final int sampledAtMillis;
+
+  /// Null where the machine has none to report — Windows — or ran a script
+  /// older than the line that carries it.
+  final ProcLoad? load;
+  final ProcColumns columns;
+  final List<ProcSortMode> sorts;
+  final ProcSortMode sort;
+  final bool ascending;
+
+  /// Empty where the platform has none implemented: no stop at all.
+  final List<ProcSignal> signals;
+
+  /// The reading as it came, handed back to order it again or to difference
+  /// the next one's speeds against.
+  final String? _json;
+
+  const PsResult({
+    required this.procs,
+    this.issue,
+    this.sampledAtMillis = 0,
+    this.load,
+    this.columns = const ProcColumns(),
+    this.sorts = const [],
+    this.sort = ProcSortMode.cpu,
+    this.ascending = false,
+    this.signals = const [],
+  }) : _json = null;
+
+  PsResult._fromJson(Map<String, Object?> j, String json)
+    : procs = [
+        for (final row in j['procs'] as List) Proc.fromJson(row as Map<String, Object?>),
+      ],
+      issue = switch (j['issue']) {
+        final Map<String, Object?> i => PsParseIssue(
+          failure:
+              PsParseFailure.fromWire(i['failure'] as String?) ?? PsParseFailure.unsupportedOutput,
+          diagnostics: i['diagnostics'] as String? ?? '',
+        ),
+        _ => null,
+      },
+      sampledAtMillis = (j['sampled_at_millis'] as num?)?.toInt() ?? 0,
+      load = switch (j['load']) {
+        final Map<String, Object?> l => (
+          one: (l['one'] as num).toDouble(),
+          five: (l['five'] as num).toDouble(),
+          fifteen: (l['fifteen'] as num).toDouble(),
+        ),
+        _ => null,
+      },
+      columns = ProcColumns.fromJson(j['columns'] as Map<String, Object?>? ?? const {}),
+      sorts = [
+        for (final s in j['sorts'] as List? ?? const []) ?ProcSortMode.fromWire(s as String?),
+      ],
+      sort = ProcSortMode.fromWire(j['sort'] as String?) ?? ProcSortMode.pid,
+      ascending = j['ascending'] as bool? ?? true,
+      signals = [
+        for (final s in j['signals'] as List? ?? const []) ?ProcSignal.fromWire(s as String?),
+      ],
+      _json = json;
+
+  static PsResult _read(String json) =>
+      PsResult._fromJson(jsonDecode(json) as Map<String, Object?>, json);
+
+  /// Reads what the process function printed ([raw]) on [system], ordered
+  /// by [sort] where the table can answer it (null: its default) and
+  /// [ascending] (null: that order's own default). [previous] is the last
+  /// reading that parsed cleanly, which read/write speeds are differenced
+  /// against; [sampledAtMillis] is when [raw] was produced.
+  static Future<PsResult> parse(
+    String raw,
+    SystemType system, {
+    ProcSortMode? sort,
+    bool? ascending,
+    PsResult? previous,
+    int? sampledAtMillis,
+  }) async => _read(
+    await ffi.procViewJson(
+      raw: raw,
+      system: system.name,
+      sort: sort?.name,
+      ascending: ascending,
+      previousJson: previous?._json,
+      sampledAtMillis: sampledAtMillis ?? DateTime.now().millisecondsSinceEpoch,
+    ),
+  );
+
+  /// This reading ordered by [sort] (null: its default), [ascending] (null:
+  /// that order's own default).
+  Future<PsResult> sortedBy(
+    SystemType system,
+    ProcSortMode? sort, {
+    bool? ascending,
+  }) async {
+    final json = _json;
+    if (json == null) return this;
+    return _read(
+      await ffi.procSortedJson(
+        viewJsonIn: json,
+        system: system.name,
+        sort: sort?.name,
+        ascending: ascending,
+      ),
+    );
   }
 }

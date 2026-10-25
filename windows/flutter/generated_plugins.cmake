@@ -3,17 +3,20 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
-  app_links
+  desktop_drop
   dynamic_color
+  file_selector_windows
+  flutter_secure_storage_windows
   local_auth_windows
-  permission_handler_windows
-  screen_retriever
+  screen_retriever_windows
   share_plus
   url_launcher_windows
   window_manager
 )
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST
+  flutter_local_notifications_windows
+  jni
 )
 
 set(PLUGIN_BUNDLED_LIBRARIES)

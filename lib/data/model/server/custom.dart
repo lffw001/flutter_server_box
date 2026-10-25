@@ -1,94 +1,108 @@
-import 'package:hive_flutter/adapters.dart';
+import 'package:json_annotation/json_annotation.dart';
+import 'package:server_box/data/model/server/geo.dart';
 
 part 'custom.g.dart';
 
-@HiveType(typeId: 7)
+/// Per-server extras.
+///
+/// PVE's settings were here as `pveAddr`, `pveIgnoreCert` and `pvePwd`. They
+/// are `PveConfig` now, in a table of their own; a record from an older build
+/// still carries them, and `PveConfig.fromLegacyRecord` reads them out of the
+/// raw JSON — this class ignores keys it does not know. This build writes them
+/// into sync files, backups and shares as well, for those builds to read
+/// (`PveConfig.toLegacyCustom`).
+@JsonSerializable(includeIfNull: false)
 final class ServerCustom {
-  // @HiveField(0)
-  // final String? temperature;
-  @HiveField(1)
-  final String? pveAddr;
-  @HiveField(2, defaultValue: false)
-  final bool pveIgnoreCert;
-
   /// {"title": "cmd"}
-  @HiveField(3)
+  ///
+  /// No longer where custom commands live: they are files in a directory on
+  /// the server, which is what the status script reads and what the editor
+  /// writes. This holds only what an older version of the app stored, until
+  /// the first connection moves it there.
+  // TODO(migration): delete this field, [withoutCmds], and
+  // `IndividualServerNotifier._migrateCustomCmds` once enough releases have
+  // passed for every install to have connected once.
   final Map<String, String>? cmds;
-  @HiveField(4)
+
   final String? preferTempDev;
-  @HiveField(5)
+
+  final bool tempIsCelsius;
+
   final String? logoUrl;
 
+  /// The device name of the network interface displayed in the home server card.
+  final String? netDev;
+
+  /// The directory where the script is stored.
+  final String? scriptDir;
+
+  /// Where this server is on the globe, said by hand.
+  ///
+  /// The first link in the chain that answers that question, and the only one
+  /// that is a statement rather than a guess: everything else is looked up
+  /// from an address, and an address is not a machine.
+  ///
+  /// [GeoCoord.tryFromJson] rather than the generated decode, so a backup
+  /// carrying something unreadable here loses the coordinate instead of the
+  /// server.
+  @JsonKey(fromJson: GeoCoord.tryFromJson, toJson: GeoCoord.encode)
+  final GeoCoord? geo;
+
+  /// Whether NFS, SMB and the like count in the disk total when the status
+  /// comes over SSH. Listed either way; their size is another machine's.
+  /// Over the monitor agent, the agent's own setting decides (#1669).
+  final bool diskCountsNetwork;
+
   const ServerCustom({
-    //this.temperature,
-    this.pveAddr,
-    this.pveIgnoreCert = false,
     this.cmds,
     this.preferTempDev,
+    this.tempIsCelsius = false,
     this.logoUrl,
+    this.netDev,
+    this.scriptDir,
+    this.geo,
+    this.diskCountsNetwork = false,
   });
 
-  static ServerCustom fromJson(Map<String, dynamic> json) {
-    //final temperature = json["temperature"] as String?;
-    final pveAddr = json["pveAddr"] as String?;
-    final pveIgnoreCert = json["pveIgnoreCert"] as bool;
-    final cmds = json["cmds"] as Map<String, dynamic>?;
-    final preferTempDev = json["preferTempDev"] as String?;
-    final logoUrl = json["logoUrl"] as String?;
-    return ServerCustom(
-      //temperature: temperature,
-      pveAddr: pveAddr,
-      pveIgnoreCert: pveIgnoreCert,
-      cmds: cmds?.cast<String, String>(),
-      preferTempDev: preferTempDev,
-      logoUrl: logoUrl,
-    );
-  }
+  /// This, with [cmds] dropped — what the app records once those commands are
+  /// on the server, so it never sends them twice.
+  // TODO(migration): delete with [cmds].
+  ServerCustom withoutCmds() => ServerCustom(
+    preferTempDev: preferTempDev,
+    tempIsCelsius: tempIsCelsius,
+    logoUrl: logoUrl,
+    netDev: netDev,
+    scriptDir: scriptDir,
+    geo: geo,
+    diskCountsNetwork: diskCountsNetwork,
+  );
 
-  Map<String, dynamic> toJson() {
-    final json = <String, dynamic>{};
-    // if (temperature != null) {
-    //   json["temperature"] = temperature;
-    // }
-    if (pveAddr != null) {
-      json["pveAddr"] = pveAddr;
-    }
-    json["pveIgnoreCert"] = pveIgnoreCert;
+  factory ServerCustom.fromJson(Map<String, dynamic> json) =>
+      _$ServerCustomFromJson(json);
 
-    if (cmds != null) {
-      json["cmds"] = cmds;
-    }
-    if (preferTempDev != null) {
-      json["preferTempDev"] = preferTempDev;
-    }
-    if (logoUrl != null) {
-      json["logoUrl"] = logoUrl;
-    }
-    return json;
-  }
-
-  @override
-  String toString() {
-    return toJson().toString();
-  }
+  Map<String, dynamic> toJson() => _$ServerCustomToJson(this);
 
   @override
   bool operator ==(Object other) {
     return other is ServerCustom &&
-        //other.temperature == temperature &&
-        other.pveAddr == pveAddr &&
-        other.pveIgnoreCert == pveIgnoreCert &&
         other.cmds == cmds &&
         other.preferTempDev == preferTempDev &&
-        other.logoUrl == logoUrl;
+        other.tempIsCelsius == tempIsCelsius &&
+        other.logoUrl == logoUrl &&
+        other.netDev == netDev &&
+        other.scriptDir == scriptDir &&
+        other.geo == geo &&
+        other.diskCountsNetwork == diskCountsNetwork;
   }
 
   @override
   int get hashCode =>
-      //temperature.hashCode ^
-      pveAddr.hashCode ^
-      pveIgnoreCert.hashCode ^
       cmds.hashCode ^
       preferTempDev.hashCode ^
-      logoUrl.hashCode;
+      tempIsCelsius.hashCode ^
+      logoUrl.hashCode ^
+      netDev.hashCode ^
+      scriptDir.hashCode ^
+      geo.hashCode ^
+      diskCountsNetwork.hashCode;
 }

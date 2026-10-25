@@ -1,22 +1,20 @@
 class Temperatures {
   final Map<String, double> _map = {};
 
-  void parse(String type, String value) {
-    final typeSplited = type.split('\n');
-    final valueSplited = value.split('\n');
-    for (var i = 0; i < typeSplited.length && i < valueSplited.length; i++) {
-      final t = typeSplited[i];
-      final v = valueSplited[i];
-      if (t.isEmpty || v.isEmpty) {
-        continue;
-      }
-      final name = t.split('/').last;
-      final temp = double.tryParse(v);
-      if (temp == null) {
-        continue;
-      }
-      _map[name] = temp / 1000;
-    }
+  Temperatures();
+
+  /// Independent snapshot. Upstream added these across the status models so a
+  /// page reading a `ServerStatus` can't have it mutate underneath — see
+  /// `ServerStatus.snapshot`.
+  Temperatures.copy(Temperatures source) {
+    _map.addAll(source._map);
+  }
+
+  /// Parsing happens in the shared Rust library (sbm_parser::linux::parse_temps); assembly only here
+  void setAll(Map<String, double> values) {
+    _map
+      ..clear()
+      ..addAll(values);
   }
 
   double? get(String name) {
